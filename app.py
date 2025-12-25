@@ -6,11 +6,12 @@ from streamlit_autorefresh import st_autorefresh
 import concurrent.futures
 import datetime
 import pytz 
+import traceback # 用于打印报错详情
 
 # --- 1. 基础配置 ---
-st.set_page_config(page_title="AI 稳定天眼", layout="wide", initial_sidebar_state="expanded")
-# 更换 Key 强制清除之前的报错缓存
-st_autorefresh(interval=60000, key="refresh_stable_final_v9")
+# 【验证点】只要你看到标题变成 "AI 最终救援"，说明代码更新成功了！
+st.set_page_config(page_title="AI 最终救援", layout="wide", initial_sidebar_state="expanded")
+st_autorefresh(interval=60000, key="refresh_rescue_v1")
 
 # CSS 样式
 st.markdown("""
@@ -19,8 +20,7 @@ st.markdown("""
         .bear { background-color: #1e3a2a; color: #4ade80; padding: 2px 6px; border-radius: 4px; border: 1px solid #4ade80; font-size: 0.85rem; font-weight: bold; }
         .neutral { background-color: #333; color: #ccc; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }
         .history-tag { background-color: #222; color: #666; padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; border: 1px solid #444; }
-        .info-box { background-color: #262730; padding: 12px; border-radius: 5px; border-left: 5px solid #4ade80; margin-bottom: 20px; }
-        .error-box { background-color: #3e2a2a; padding: 10px; border-radius: 5px; border-left: 5px solid #ff4b4b; color: #ccc; font-size: 0.9rem; margin-bottom: 10px; }
+        .debug-box { background-color: #222; color: #ff4b4b; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 0.8rem; margin-bottom: 10px; border: 1px solid #555; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -29,10 +29,10 @@ if 'watchlist' not in st.session_state:
     st.session_state.watchlist = ["518880", "512480", "513130", "159915", "513050"]
 
 with st.sidebar:
-    st.header("⚡ 控制台")
+    st.header("⛑️ 救援控制台")
     tz_cn = pytz.timezone('Asia/Shanghai')
     now = datetime.datetime.now(tz_cn)
-    st.caption(f"北京时间: {now.strftime('%H:%M:%S')}")
+    st.caption(f"当前: {now.strftime('%H:%M:%S')}")
 
     if "DEEPSEEK_KEY" in st.secrets:
         api_key = st.secrets["DEEPSEEK_KEY"]
@@ -42,7 +42,8 @@ with st.sidebar:
         st.error("❌ 密钥缺失")
     
     st.divider()
-    ai_limit = st.slider("🤖 AI 分析条数", 10, 60, 30)
+    # 默认只分析10条，先保证能跑通
+    ai_limit = st.slider("🤖 AI 分析条数", 10, 50, 20)
     
     st.divider()
     new_c = st.text_input("➕ 加代码", placeholder="512480")
@@ -55,7 +56,8 @@ with st.sidebar:
         for c in rem_list: st.session_state.watchlist.remove(c)
         st.rerun()
     
-    if st.button("🔴 强制重启"):
+    # 红色按钮：强制重置
+    if st.button("🔴 强制重置缓存"):
         st.cache_data.clear()
         st.rerun()
 
@@ -72,140 +74,56 @@ def analyze_single_news(content):
         return res.choices[0].message.content.strip()
     except Exception: return ""
 
-# --- 4. 智能日期补全 (保留这个核心功能) ---
+# --- 4. 智能日期补全 ---
 def clean_and_fix_date(t_str):
     t_str = str(t_str).strip()
     tz_cn = pytz.timezone('Asia/Shanghai')
     now = datetime.datetime.now(tz_cn)
-    
     try:
-        if len(t_str) <= 8: # 只有时间
+        if len(t_str) <= 8: 
             parts = t_str.split(":")
             h, m = int(parts[0]), int(parts[1])
             dt = now.replace(hour=h, minute=m, second=0)
-            # 如果时间比现在晚太多(超过30分钟)，说明是昨天的
             if dt > now + datetime.timedelta(minutes=30):
                 dt = dt - datetime.timedelta(days=1)
             return dt.strftime("%Y-%m-%d %H:%M:%S")
-        elif len(t_str) < 15 and "-" in t_str: # 只有月日
+        elif len(t_str) < 15 and "-" in t_str: 
             return f"{now.year}-{t_str}" + (":00" if t_str.count(":")==1 else "")
         return t_str
     except:
         return t_str 
 
-# --- 5. 数据获取 (回归稳定源) ---
+# --- 5. 数据获取 (带详细报错) ---
 @st.cache_data(ttl=60)
-def get_stable_data(ai_count):
+def get_rescue_data(ai_count):
     news = []
-    errors = []
+    debug_logs = [] # 记录报错信息
     
-    # 源1: 金十数据 (尝试抓 300 条，比较安全)
-    try:
-        df_js = ak.js_news(count=300) 
-        for _, r in df_js.iterrows():
-            news.append({"t_raw": str(r['time']), "txt": str(r['title']), "src": "Global"})
-    except Exception as e: 
-        errors.append(f"金十数据连接失败: {str(e)}")
-
-    # 源2: 财联社 (回归最稳的 global_cls)
+    # 源1: 财联社 (最稳的接口)
     try:
         df_cn = ak.stock_info_global_cls(symbol="全部").head(100)
         for _, r in df_cn.iterrows():
             news.append({"t_raw": str(r['发布时间']), "txt": str(r['内容']), "src": "CN"})
     except Exception as e:
-        errors.append(f"财联社连接失败: {str(e)}")
+        debug_logs.append(f"财联社接口报错: {str(e)}")
+
+    # 源2: 金十数据 (尝试抓300条，如果不行为空)
+    try:
+        df_js = ak.js_news(count=300) 
+        for _, r in df_js.iterrows():
+            news.append({"t_raw": str(r['time']), "txt": str(r['title']), "src": "Global"})
+    except Exception as e:
+        debug_logs.append(f"金十数据报错: {str(e)}")
 
     df = pd.DataFrame(news)
     
-    # 如果完全没数据，返回空
-    if df.empty: return df, errors
+    # 如果完全没有数据，返回错误日志
+    if df.empty: 
+        return df, debug_logs
 
-    # 1. 修复时间
+    # 数据清洗
     df['full_time'] = df['t_raw'].apply(clean_and_fix_date)
-    
-    # 2. 排序
     df.sort_values(by='full_time', ascending=False, inplace=True)
     df.drop_duplicates(subset=['txt'], inplace=True)
-    
-    # 3. 截取 (保留300条，防止卡顿)
     df = df.head(300)
-    
-    # 4. 显示时间
-    df['show_t'] = df['full_time'].apply(lambda x: x[5:16] if len(x) > 16 else x)
-
-    # 5. AI 分析
-    df_head = df.head(ai_count).copy()
-    df_tail = df.iloc[ai_count:].copy()
-    df_tail['ai_result'] = "" 
-
-    # 仅当有数据需要分析时才开线程
-    if not df_head.empty:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            results = list(executor.map(analyze_single_news, df_head['txt'].tolist()))
-        df_head['ai_result'] = results
-    
-    final_df = pd.concat([df_head, df_tail])
-    return final_df, errors
-
-# --- 6. 主界面 ---
-col1, col2 = st.columns([2.5, 1])
-
-with col1:
-    with st.spinner(f"正在连接稳定数据源..."):
-        df, err_list = get_stable_data(ai_limit)
-    
-    # 错误提示区 (如果某一个源挂了，会在这里显示，而不是整个网页变红)
-    if err_list:
-        for err in err_list:
-            st.markdown(f"<div class='error-box'>⚠️ {err}</div>", unsafe_allow_html=True)
-
-    if not df.empty:
-        start_t = df['full_time'].iloc[-1]
-        end_t = df['full_time'].iloc[0]
-        
-        st.markdown(f"""
-            <div class="info-box">
-                <b>📊 实时监控中心</b><br>
-                已加载情报：<b>{len(df)}</b> 条 <br>
-                时间跨度：{start_t[5:16]} 至 {end_t[5:16]}
-            </div>
-        """, unsafe_allow_html=True)
-        
-        with st.container(height=800):
-            for i, row in df.iterrows():
-                with st.container(border=True):
-                    ans = row['ai_result']
-                    
-                    tag_html = ""
-                    if ans:
-                        if "利好" in ans: tag_html = f'<span class="bull">🚀 {ans}</span>'
-                        elif "利空" in ans: tag_html = f'<span class="bear">🧪 {ans}</span>'
-                        elif "中性" in ans: tag_html = f'<span class="neutral">😐 {ans}</span>'
-                        else: tag_html = f'<span class="neutral">🤖 {ans}</span>'
-                    else:
-                        tag_html = f'<span class="history-tag">📜 历史</span>'
-                    
-                    header = f"**{row['show_t']}** &nbsp; `{row['src']}` &nbsp; {tag_html}"
-                    st.markdown(header, unsafe_allow_html=True)
-                    st.write(row['txt'])
-    else:
-        st.error("⚠️ 所有数据源暂时无法连接，可能是网络波动或接口限制，请稍后刷新。")
-
-with col2:
-    st.subheader("📊 核心标的")
-    try:
-        codes = st.session_state.watchlist
-        spot = ak.fund_etf_spot_em()
-        my_spot = spot[spot['代码'].isin(codes)]
-        
-        for _, r in my_spot.iterrows():
-            val = float(r['涨跌幅'])
-            st.metric(
-                label=f"{r['名称']}",
-                value=r['最新价'],
-                delta=f"{val}%",
-                delta_color="inverse"
-            )
-            st.divider()
-    except:
-        st.caption("行情加载中...")
+    df['show_t'] = df['full_time'].apply(lambda x: x[5:1
