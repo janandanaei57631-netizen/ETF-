@@ -8,8 +8,9 @@ import datetime
 import pytz 
 
 # --- 1. 基础配置 ---
-st.set_page_config(page_title="AI ETF 暴力匹配", layout="wide", initial_sidebar_state="expanded")
-st_autorefresh(interval=60000, key="refresh_force_match_v3")
+st.set_page_config(page_title="AI ETF 暴力匹配 (修复版)", layout="wide", initial_sidebar_state="expanded")
+# 【关键修改】更换 key，强制清洗旧缓存
+st_autorefresh(interval=60000, key="refresh_fix_crash_v4")
 
 # CSS 样式
 st.markdown("""
@@ -25,15 +26,12 @@ st.markdown("""
         .time-badge { color: #888; font-family: monospace; font-size: 0.8rem; }
         .src-badge { background: #333; color: #aaa; padding: 1px 4px; border-radius: 3px; font-size: 0.75rem; }
         
-        /* 紫色 ETF 标签 */
         .etf-tag { 
             background: #4a148c; color: #e1bee7; border: 1px solid #7b1fa2; 
             padding: 1px 6px; border-radius: 4px; font-family: monospace; font-weight: bold; 
             font-size: 0.85rem; cursor: pointer; display: flex; align-items: center; gap: 4px;
         }
         .sector-tag { background: #0d47a1; color: #90caf9; border: 1px solid #1565c0; padding: 1px 5px; border-radius: 4px; font-size: 0.75rem; }
-        
-        /* 调试用的小字 */
         .debug-tag { font-size: 0.7rem; color: #555; margin-left: 5px; font-family: monospace; }
 
         .impact-high { color: #ff5252; font-weight: bold; margin-left: auto; font-size: 0.85rem; }
@@ -64,7 +62,6 @@ with st.sidebar:
         st.rerun()
 
 # --- 3. 核心：超全 ETF 字典 ---
-# 这里的 Key 是关键词，Value 是 (ETF代码, ETF简称)
 ETF_MAPPING = {
     # === 热门黑科技 ===
     "低空": ("512660", "军工龙头"), "飞行": ("512660", "军工龙头"), "无人机": ("512660", "军工龙头"), "航天": ("512660", "军工龙头"), "卫星": ("512660", "军工龙头"),
@@ -84,7 +81,7 @@ ETF_MAPPING = {
     "有色": ("512400", "有色ETF"), "铜": ("512400", "有色ETF"), "铝": ("512400", "有色ETF"), "稀土": ("516150", "稀土ETF"),
     "油": ("561360", "石油ETF"), "石化": ("561360", "石油ETF"), "煤": ("515220", "煤炭ETF"),
     "电": ("561560", "电力ETF"), "绿电": ("561560", "电力ETF"), "核电": ("561560", "电力ETF"),
-    "船": ("510880", "红利ETF"), "运": ("510880", "红利ETF"), # 航运通常在红利里
+    "船": ("510880", "红利ETF"), "运": ("510880", "红利ETF"),
 
     # === 大消费/医药 ===
     "酒": ("512690", "酒ETF"), "食": ("512690", "酒ETF"), "饮": ("512690", "酒ETF"), "乳": ("512690", "酒ETF"),
@@ -103,25 +100,13 @@ ETF_MAPPING = {
 }
 
 def map_to_etf(keyword):
-    """
-    暴力匹配逻辑：
-    只要 字典里的 Key 出现在了 AI识别词 里，就匹配！
-    例如：字典有 "低空"，AI 识别出 "低空经济发展"， "低空" in "低空经济发展" -> 成功！
-    """
     if not keyword or keyword == "无": return None
-    
     # 1. 直接匹配
     if keyword in ETF_MAPPING: return ETF_MAPPING[keyword]
-    
     # 2. 暴力包含匹配
     for key, val in ETF_MAPPING.items():
-        # 如果字典里的关键词 (如 "低空") 出现在了 AI识别词 (如 "低空经济") 里
-        if key in keyword:
-            return val
-        # 反之亦然
-        if keyword in key:
-            return val
-            
+        if key in keyword: return val
+        if keyword in key: return val
     return None
 
 # --- 4. AI 分析 ---
@@ -135,7 +120,7 @@ def analyze_news(content):
         
         1.方向：利好/利空/中性
         2.核心词：
-           - 提取最核心的【行业关键词】，不要写长句子。
+           - 提取最核心的【行业关键词】。
            - 比如提到"万丰奥威"，你要提取"低空"。
            - 比如提到"中远海控"，你要提取"海运"。
            - 尽量用2-3个字，如：半导体、机器人、白酒、黄金。
@@ -159,7 +144,7 @@ def analyze_news(content):
             
             return {
                 "dir": parts[0].strip(),
-                "concept": concept, # 这是 AI 提取的原始词
+                "concept": concept,
                 "etf_code": etf_code,
                 "etf_name": etf_name,
                 "impact": parts[2].strip()
@@ -174,10 +159,10 @@ def clean_date(t_str):
         return str(t_str)
     except: return ""
 
+# 【关键修改】函数改名，防止读取旧缓存导致的 KeyError
 @st.cache_data(ttl=60)
-def get_data(limit):
+def get_data_v4(limit):
     news = []
-    # 极速多源
     try:
         df1 = ak.stock_info_global_sina()
         for _, r in df1.iterrows(): news.append({"t": str(r['时间']), "txt": str(r['内容']), "src": "新浪"})
@@ -216,18 +201,21 @@ def render_card(row):
     tags = ""
     
     if ai:
-        # 显示 ETF 标签
-        if ai['etf_code']:
-            # 命中！显示紫色标签
-            tags += f"<span class='etf-tag'>📊 {ai['etf_name']} {ai['etf_code']}</span> "
-            # 调试：显示AI提取了什么词
-            tags += f"<span class='debug-tag'>[AI识别:{ai['concept']}]</span>"
-        elif ai['concept'] and ai['concept'] != "无":
-            # 未命中，显示蓝色
-            tags += f"<span class='sector-tag'>📂 {ai['concept']}</span> "
+        # 【关键修改】使用 .get() 方法，防止 KeyError 报错
+        code = ai.get('etf_code')
+        name = ai.get('etf_name')
+        concept = ai.get('concept', '未知')
+        
+        if code:
+            # 命中字典
+            tags += f"<span class='etf-tag'>📊 {name} {code}</span> "
+            tags += f"<span class='debug-tag'>[AI:{concept}]</span>"
+        elif concept and concept != "无":
+            # 未命中
+            tags += f"<span class='sector-tag'>📂 {concept}</span> "
             tags += f"<span class='debug-tag'>[未匹配]</span>"
             
-        imp = ai['impact']
+        imp = ai.get('impact', '')
         if "涨" in imp: tags += f"<span class='impact-high'>🔥 {imp}</span>"
         elif "跌" in imp: tags += f"<span class='impact-low'>🟢 {imp}</span>"
     
@@ -251,13 +239,14 @@ col1, col2 = st.columns([3, 1])
 
 with col1:
     with st.spinner("🚀 AI 正在进行 ETF 暴力匹配..."):
-        df = get_data(ai_limit)
+        df = get_data_v4(ai_limit)
     
     if not df.empty:
         df_ai = df[df['ai'].notnull()]
         
-        bull = df_ai[df_ai['ai'].apply(lambda x: x and '利好' in x['dir'])]
-        bear = df_ai[df_ai['ai'].apply(lambda x: x and '利空' in x['dir'])]
+        # 安全获取方向
+        bull = df_ai[df_ai['ai'].apply(lambda x: x and '利好' in x.get('dir', ''))]
+        bear = df_ai[df_ai['ai'].apply(lambda x: x and '利空' in x.get('dir', ''))]
         
         exclude = list(bull.index) + list(bear.index)
         rest = df[~df.index.isin(exclude)]
