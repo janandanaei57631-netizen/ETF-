@@ -8,8 +8,8 @@ import datetime
 import pytz 
 
 # --- 1. 基础配置 ---
-st.set_page_config(page_title="AI 24h全景 (修复跨日)", layout="wide", initial_sidebar_state="expanded")
-st_autorefresh(interval=60000, key="refresh_fix_date_v1")
+st.set_page_config(page_title="AI 深海捕捞", layout="wide", initial_sidebar_state="expanded")
+st_autorefresh(interval=60000, key="refresh_deep_sea_v1")
 
 # CSS 样式
 st.markdown("""
@@ -18,7 +18,7 @@ st.markdown("""
         .bear { background-color: #1e3a2a; color: #4ade80; padding: 2px 6px; border-radius: 4px; border: 1px solid #4ade80; font-size: 0.85rem; font-weight: bold; }
         .neutral { background-color: #333; color: #ccc; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }
         .history-tag { background-color: #222; color: #666; padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; border: 1px solid #444; }
-        .count-badge { font-size: 1.2rem; font-weight: bold; color: #f1c40f; }
+        .info-box { background-color: #262730; padding: 10px; border-radius: 5px; border-left: 5px solid #f1c40f; margin-bottom: 20px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -30,7 +30,7 @@ with st.sidebar:
     st.header("⚡ 控制台")
     tz_cn = pytz.timezone('Asia/Shanghai')
     now = datetime.datetime.now(tz_cn)
-    st.caption(f"当前时间: {now.strftime('%m-%d %H:%M')}")
+    st.caption(f"当前: {now.strftime('%m-%d %H:%M')}")
 
     if "DEEPSEEK_KEY" in st.secrets:
         api_key = st.secrets["DEEPSEEK_KEY"]
@@ -40,7 +40,7 @@ with st.sidebar:
         st.error("❌ 密钥缺失")
     
     st.divider()
-    ai_limit = st.slider("🤖 AI 分析条数", 10, 60, 30)
+    ai_limit = st.slider("🤖 AI 分析最新 N 条", 10, 100, 30)
     
     st.divider()
     new_c = st.text_input("➕ 加代码", placeholder="512480")
@@ -53,11 +53,11 @@ with st.sidebar:
         for c in rem_list: st.session_state.watchlist.remove(c)
         st.rerun()
     
-    if st.button("🔴 强制重置"):
+    if st.button("🔴 强制深挖数据"):
         st.cache_data.clear()
         st.rerun()
 
-# --- 3. AI 分析函数 ---
+# --- 3. AI 分析 ---
 def analyze_single_news(content):
     if not api_key: return ""
     try:
@@ -70,71 +70,74 @@ def analyze_single_news(content):
         return res.choices[0].message.content.strip()
     except Exception: return ""
 
-# --- 4. 智能日期处理函数 (核心修复) ---
-def fix_datetime(row):
-    """
-    如果时间没有日期 (长度<10)，根据当前时间推算它是今天还是昨天
-    """
-    raw_t = str(row['t_raw'])
+# --- 4. 智能日期补全 (核心) ---
+def clean_and_fix_date(t_str):
+    """将各种乱七八糟的时间格式统一为 YYYY-MM-DD HH:MM:SS"""
+    t_str = str(t_str).strip()
     tz_cn = pytz.timezone('Asia/Shanghai')
     now = datetime.datetime.now(tz_cn)
     
-    # 如果 raw_t 已经是完整日期 (如 2024-12-25 10:00:00)，直接用
-    if len(raw_t) > 10:
-        return raw_t
-    
-    # 如果只有时间 (如 10:00:00)
     try:
-        # 先假设是今天
-        t_obj = datetime.datetime.strptime(raw_t, "%H:%M:%S").time()
-        dt_today = now.replace(hour=t_obj.hour, minute=t_obj.minute, second=t_obj.second)
-        
-        # 如果时间比现在晚太多 (比如现在是早上9点，新闻是23点)，说明是昨天的
-        if dt_today > now + datetime.timedelta(minutes=30): # 容错30分钟
-            dt_final = dt_today - datetime.timedelta(days=1)
-        else:
-            dt_final = dt_today
+        # 情况1: 只有时间 "14:30:00" 或 "14:30"
+        if len(t_str) <= 8: 
+            # 补全日期
+            parts = t_str.split(":")
+            h, m = int(parts[0]), int(parts[1])
+            s = int(parts[2]) if len(parts) > 2 else 0
             
-        return dt_final.strftime("%Y-%m-%d %H:%M:%S")
+            dt = now.replace(hour=h, minute=m, second=s)
+            # 如果时间比现在晚太多（比如现在9点，新闻是23点），说明是昨天的
+            if dt > now + datetime.timedelta(minutes=30):
+                dt = dt - datetime.timedelta(days=1)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 情况2: 只有月日 "12-25 14:30"
+        elif len(t_str) < 15 and "-" in t_str:
+            return f"{now.year}-{t_str}" + (":00" if t_str.count(":")==1 else "")
+            
+        # 情况3: 完整时间
+        return t_str
     except:
-        return str(now) # 出错就给当前时间
+        return t_str # 如果实在解析不了，就原样返回，防止报错
 
-# --- 5. 数据获取 ---
+# --- 5. 数据获取 (更换了更强的接口) ---
 @st.cache_data(ttl=60)
-def get_history_data_v4(ai_count):
+def get_deep_data(ai_count):
     news = []
     
-    # 1. 金十数据 (尝试抓更多)
+    # 源1: 财联社电报 (stock_telegraph_cls) - 往往比 global_cls 数据更深
     try:
-        df_js = ak.js_news(count=400) 
-        for _, r in df_js.iterrows():
-            news.append({"t_raw": str(r['time']), "txt": str(r['title']), "src": "Global"})
-    except: pass
-
-    # 2. 财联社
-    try:
-        df_cn = ak.stock_info_global_cls(symbol="全部").head(100)
+        df_cn = ak.stock_telegraph_cls(symbol="全部")
+        # 尝试取前 300 条
+        df_cn = df_cn.head(300)
         for _, r in df_cn.iterrows():
             news.append({"t_raw": str(r['发布时间']), "txt": str(r['内容']), "src": "CN"})
+    except: pass
+
+    # 源2: 金十数据 (尝试抓 500 条)
+    try:
+        df_js = ak.js_news(count=500) 
+        for _, r in df_js.iterrows():
+            news.append({"t_raw": str(r['time']), "txt": str(r['title']), "src": "Global"})
     except: pass
 
     df = pd.DataFrame(news)
     if df.empty: return df
 
-    # --- 关键步骤：补全日期 ---
-    df['full_time'] = df.apply(fix_datetime, axis=1)
+    # 1. 修复时间
+    df['full_time'] = df['t_raw'].apply(clean_and_fix_date)
     
-    # --- 排序 (现在是按真实的日期时间排序了！) ---
+    # 2. 排序
     df.sort_values(by='full_time', ascending=False, inplace=True)
     df.drop_duplicates(subset=['txt'], inplace=True)
     
-    # 截取
+    # 3. 限制显示数量，防止浏览器崩溃 (保留400条)
     df = df.head(400)
     
-    # 格式化显示时间 (月-日 时:分)
-    df['show_t'] = df['full_time'].apply(lambda x: x[5:16] if len(x)>16 else x)
+    # 4. 格式化用于显示的时间 (MM-DD HH:MM)
+    df['show_t'] = df['full_time'].apply(lambda x: x[5:16] if len(x) > 16 else x)
 
-    # 切分分析
+    # 5. AI 分析
     df_head = df.head(ai_count).copy()
     df_tail = df.iloc[ai_count:].copy()
     df_tail['ai_result'] = "" 
@@ -150,22 +153,34 @@ def get_history_data_v4(ai_count):
 col1, col2 = st.columns([2.5, 1])
 
 with col1:
-    with st.spinner(f"正在校准 24小时 时间线..."):
-        df = get_history_data_v4(ai_limit)
+    with st.spinner(f"正在深海挖掘历史数据..."):
+        df = get_deep_data(ai_limit)
     
     if not df.empty:
         # 计算时间跨度
-        start_time = df['show_t'].iloc[-1]
-        end_time = df['show_t'].iloc[0]
+        start_t = df['full_time'].iloc[-1]
+        end_t = df['full_time'].iloc[0]
+        total_h = 0
+        try:
+            t1 = datetime.datetime.strptime(start_t, "%Y-%m-%d %H:%M:%S")
+            t2 = datetime.datetime.strptime(end_t, "%Y-%m-%d %H:%M:%S")
+            diff = t2 - t1
+            total_h = round(diff.total_seconds() / 3600, 1)
+        except: pass
         
+        # 状态栏 (诚实显示数据范围)
         st.markdown(f"""
-            <div style="margin-bottom:10px; border-bottom:1px solid #333; padding-bottom:10px;">
-                <span class="count-badge">{len(df)}</span> 条情报 
-                <span style="color:#f1c40f; margin-left:10px; font-weight:bold;">🕒 覆盖范围: {start_time} 至 {end_time}</span>
+            <div class="info-box">
+                <b>📊 数据挖掘报告</b><br>
+                抓取总量：{len(df)} 条<br>
+                最早时间：{start_t} <br>
+                最新时间：{end_t} <br>
+                <b>⏱️ 实际覆盖时长：{total_h} 小时</b> <br>
+                <span style="font-size:0.8rem; color:#888;">(注：如果覆盖不足24h，说明数据源接口已达上限)</span>
             </div>
         """, unsafe_allow_html=True)
         
-        with st.container(height=850):
+        with st.container(height=800):
             for i, row in df.iterrows():
                 with st.container(border=True):
                     ans = row['ai_result']
@@ -183,7 +198,7 @@ with col1:
                     st.markdown(header, unsafe_allow_html=True)
                     st.write(row['txt'])
     else:
-        st.warning("暂无数据")
+        st.error("数据源未返回数据，请稍后重试。")
 
 with col2:
     st.subheader("📊 核心标的")
