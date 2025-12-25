@@ -6,12 +6,11 @@ from streamlit_autorefresh import st_autorefresh
 import concurrent.futures
 import datetime
 import pytz 
-import traceback # 用于打印报错详情
+import traceback 
 
 # --- 1. 基础配置 ---
-# 【验证点】只要你看到标题变成 "AI 最终救援"，说明代码更新成功了！
 st.set_page_config(page_title="AI 最终救援", layout="wide", initial_sidebar_state="expanded")
-st_autorefresh(interval=60000, key="refresh_rescue_v1")
+st_autorefresh(interval=60000, key="refresh_fix_syntax_v2")
 
 # CSS 样式
 st.markdown("""
@@ -42,7 +41,6 @@ with st.sidebar:
         st.error("❌ 密钥缺失")
     
     st.divider()
-    # 默认只分析10条，先保证能跑通
     ai_limit = st.slider("🤖 AI 分析条数", 10, 50, 20)
     
     st.divider()
@@ -56,12 +54,11 @@ with st.sidebar:
         for c in rem_list: st.session_state.watchlist.remove(c)
         st.rerun()
     
-    # 红色按钮：强制重置
     if st.button("🔴 强制重置缓存"):
         st.cache_data.clear()
         st.rerun()
 
-# --- 3. AI 分析 ---
+# --- 3. 辅助函数 ---
 def analyze_single_news(content):
     if not api_key: return ""
     try:
@@ -74,7 +71,6 @@ def analyze_single_news(content):
         return res.choices[0].message.content.strip()
     except Exception: return ""
 
-# --- 4. 智能日期补全 ---
 def clean_and_fix_date(t_str):
     t_str = str(t_str).strip()
     tz_cn = pytz.timezone('Asia/Shanghai')
@@ -93,37 +89,106 @@ def clean_and_fix_date(t_str):
     except:
         return t_str 
 
-# --- 5. 数据获取 (带详细报错) ---
+# 单独写一个函数处理时间显示，防止报错
+def format_display_time(t_str):
+    if len(t_str) > 16:
+        return t_str[5:16]
+    return t_str
+
+# --- 4. 数据获取 ---
 @st.cache_data(ttl=60)
 def get_rescue_data(ai_count):
     news = []
-    debug_logs = [] # 记录报错信息
+    debug_logs = []
     
-    # 源1: 财联社 (最稳的接口)
+    # 尝试财联社
     try:
         df_cn = ak.stock_info_global_cls(symbol="全部").head(100)
         for _, r in df_cn.iterrows():
             news.append({"t_raw": str(r['发布时间']), "txt": str(r['内容']), "src": "CN"})
     except Exception as e:
-        debug_logs.append(f"财联社接口报错: {str(e)}")
+        debug_logs.append(f"财联社报错: {str(e)}")
 
-    # 源2: 金十数据 (尝试抓300条，如果不行为空)
+    # 尝试金十
     try:
         df_js = ak.js_news(count=300) 
         for _, r in df_js.iterrows():
             news.append({"t_raw": str(r['time']), "txt": str(r['title']), "src": "Global"})
     except Exception as e:
-        debug_logs.append(f"金十数据报错: {str(e)}")
+        debug_logs.append(f"金十报错: {str(e)}")
 
     df = pd.DataFrame(news)
     
-    # 如果完全没有数据，返回错误日志
     if df.empty: 
         return df, debug_logs
 
-    # 数据清洗
+    # 数据处理
     df['full_time'] = df['t_raw'].apply(clean_and_fix_date)
     df.sort_values(by='full_time', ascending=False, inplace=True)
     df.drop_duplicates(subset=['txt'], inplace=True)
     df = df.head(300)
-    df['show_t'] = df['full_time'].apply(lambda x: x[5:1
+    
+    # 【修复点】这里不再用 lambda，改用函数，防止复制出错
+    df['show_t'] = df['full_time'].apply(format_display_time)
+
+    # AI 分析
+    df_head = df.head(ai_count).copy()
+    df_tail = df.iloc[ai_count:].copy()
+    df_tail['ai_result'] = "" 
+
+    if not df_head.empty:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            results = list(executor.map(analyze_single_news, df_head['txt'].tolist()))
+        df_head['ai_result'] = results
+    
+    final_df = pd.concat([df_head, df_tail])
+    return final_df, debug_logs
+
+# --- 5. 主界面 ---
+col1, col2 = st.columns([2.5, 1])
+
+with col1:
+    with st.spinner(f"正在进行最终数据连接..."):
+        df, logs = get_rescue_data(ai_limit)
+    
+    # 显示报错（如果有）
+    if logs:
+        st.markdown("**⚠️ 调试日志 (截图给我看):**")
+        for log in logs:
+            st.markdown(f"<div class='debug-box'>{log}</div>", unsafe_allow_html=True)
+
+    if not df.empty:
+        count = len(df)
+        st.success(f"✅ 成功连接！获取到 {count} 条数据")
+        
+        with st.container(height=800):
+            for i, row in df.iterrows():
+                with st.container(border=True):
+                    ans = row['ai_result']
+                    tag_html = ""
+                    if ans:
+                        if "利好" in ans: tag_html = f'<span class="bull">🚀 {ans}</span>'
+                        elif "利空" in ans: tag_html = f'<span class="bear">🧪 {ans}</span>'
+                        elif "中性" in ans: tag_html = f'<span class="neutral">😐 {ans}</span>'
+                        else: tag_html = f'<span class="neutral">🤖 {ans}</span>'
+                    else:
+                        tag_html = f'<span class="history-tag">📜 历史</span>'
+                    
+                    header = f"**{row['show_t']}** &nbsp; `{row['src']}` &nbsp; {tag_html}"
+                    st.markdown(header, unsafe_allow_html=True)
+                    st.write(row['txt'])
+    else:
+        st.error("所有接口均未返回数据，请查看上方的调试日志。")
+
+with col2:
+    st.subheader("📊 核心标的")
+    try:
+        codes = st.session_state.watchlist
+        spot = ak.fund_etf_spot_em()
+        my_spot = spot[spot['代码'].isin(codes)]
+        for _, r in my_spot.iterrows():
+            val = float(r['涨跌幅'])
+            st.metric(label=f"{r['名称']}", value=r['最新价'], delta=f"{val}%", delta_color="inverse")
+            st.divider()
+    except:
+        st.caption("行情加载中...")
