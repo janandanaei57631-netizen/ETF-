@@ -8,8 +8,8 @@ import datetime
 import pytz 
 
 # --- 1. 基础配置 ---
-st.set_page_config(page_title="AI 24h全景", layout="wide", initial_sidebar_state="expanded")
-st_autorefresh(interval=60000, key="refresh_stable_v1")
+st.set_page_config(page_title="AI 24h全景 (修复跨日)", layout="wide", initial_sidebar_state="expanded")
+st_autorefresh(interval=60000, key="refresh_fix_date_v1")
 
 # CSS 样式
 st.markdown("""
@@ -29,8 +29,8 @@ if 'watchlist' not in st.session_state:
 with st.sidebar:
     st.header("⚡ 控制台")
     tz_cn = pytz.timezone('Asia/Shanghai')
-    now_cn = datetime.datetime.now(tz_cn).strftime("%m-%d %H:%M")
-    st.caption(f"当前: {now_cn}")
+    now = datetime.datetime.now(tz_cn)
+    st.caption(f"当前时间: {now.strftime('%m-%d %H:%M')}")
 
     if "DEEPSEEK_KEY" in st.secrets:
         api_key = st.secrets["DEEPSEEK_KEY"]
@@ -40,7 +40,7 @@ with st.sidebar:
         st.error("❌ 密钥缺失")
     
     st.divider()
-    ai_limit = st.slider("🤖 AI 分析条数", 10, 50, 20)
+    ai_limit = st.slider("🤖 AI 分析条数", 10, 60, 30)
     
     st.divider()
     new_c = st.text_input("➕ 加代码", placeholder="512480")
@@ -57,93 +57,115 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-# --- 3. AI 分析函数 (修复了报错点) ---
+# --- 3. AI 分析函数 ---
 def analyze_single_news(content):
-    # 检查 Key 是否存在
-    if not api_key:
-        return ""
-    
-    # 这里使用了完整的 try-except 结构，防止报错
+    if not api_key: return ""
     try:
         client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
         res = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": f"分析新闻：{content[:80]}\n结论：【利好】xx 或 【利空】xx。6字内。"}],
-            temperature=0.1,
-            max_tokens=30
+            temperature=0.1, max_tokens=30
         )
         return res.choices[0].message.content.strip()
-    except Exception:
-        return ""
+    except Exception: return ""
 
-# --- 4. 数据获取 ---
+# --- 4. 智能日期处理函数 (核心修复) ---
+def fix_datetime(row):
+    """
+    如果时间没有日期 (长度<10)，根据当前时间推算它是今天还是昨天
+    """
+    raw_t = str(row['t_raw'])
+    tz_cn = pytz.timezone('Asia/Shanghai')
+    now = datetime.datetime.now(tz_cn)
+    
+    # 如果 raw_t 已经是完整日期 (如 2024-12-25 10:00:00)，直接用
+    if len(raw_t) > 10:
+        return raw_t
+    
+    # 如果只有时间 (如 10:00:00)
+    try:
+        # 先假设是今天
+        t_obj = datetime.datetime.strptime(raw_t, "%H:%M:%S").time()
+        dt_today = now.replace(hour=t_obj.hour, minute=t_obj.minute, second=t_obj.second)
+        
+        # 如果时间比现在晚太多 (比如现在是早上9点，新闻是23点)，说明是昨天的
+        if dt_today > now + datetime.timedelta(minutes=30): # 容错30分钟
+            dt_final = dt_today - datetime.timedelta(days=1)
+        else:
+            dt_final = dt_today
+            
+        return dt_final.strftime("%Y-%m-%d %H:%M:%S")
+    except:
+        return str(now) # 出错就给当前时间
+
+# --- 5. 数据获取 ---
 @st.cache_data(ttl=60)
-def get_history_data_v3(ai_count):
+def get_history_data_v4(ai_count):
     news = []
     
-    # 1. 金十数据
+    # 1. 金十数据 (尝试抓更多)
     try:
-        df_js = ak.js_news(count=500) 
+        df_js = ak.js_news(count=400) 
         for _, r in df_js.iterrows():
-            t = str(r['time']) 
-            show_t = t[5:16] if len(t) > 16 else t 
-            news.append({"t": t, "show_t": show_t, "txt": str(r['title']), "src": "Global"})
-    except:
-        pass
+            news.append({"t_raw": str(r['time']), "txt": str(r['title']), "src": "Global"})
+    except: pass
 
     # 2. 财联社
     try:
         df_cn = ak.stock_info_global_cls(symbol="全部").head(100)
         for _, r in df_cn.iterrows():
-            t = str(r['发布时间'])
-            show_t = t[5:16] if len(t) > 10 else t
-            news.append({"t": t, "show_t": show_t, "txt": str(r['内容']), "src": "CN"})
-    except:
-        pass
+            news.append({"t_raw": str(r['发布时间']), "txt": str(r['内容']), "src": "CN"})
+    except: pass
 
     df = pd.DataFrame(news)
     if df.empty: return df
 
-    # 排序
-    df.sort_values(by='t', ascending=False, inplace=True)
+    # --- 关键步骤：补全日期 ---
+    df['full_time'] = df.apply(fix_datetime, axis=1)
+    
+    # --- 排序 (现在是按真实的日期时间排序了！) ---
+    df.sort_values(by='full_time', ascending=False, inplace=True)
     df.drop_duplicates(subset=['txt'], inplace=True)
     
     # 截取
     df = df.head(400)
     
-    # 切分
+    # 格式化显示时间 (月-日 时:分)
+    df['show_t'] = df['full_time'].apply(lambda x: x[5:16] if len(x)>16 else x)
+
+    # 切分分析
     df_head = df.head(ai_count).copy()
     df_tail = df.iloc[ai_count:].copy()
     df_tail['ai_result'] = "" 
 
-    # 并发
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         results = list(executor.map(analyze_single_news, df_head['txt'].tolist()))
     df_head['ai_result'] = results
     
-    # 合并
     final_df = pd.concat([df_head, df_tail])
-    
     return final_df
 
-# --- 5. 主界面 ---
+# --- 6. 主界面 ---
 col1, col2 = st.columns([2.5, 1])
 
 with col1:
-    with st.spinner(f"正在拉取数据..."):
-        df = get_history_data_v3(ai_limit)
+    with st.spinner(f"正在校准 24小时 时间线..."):
+        df = get_history_data_v4(ai_limit)
     
-    count_total = len(df)
-    
-    st.markdown(f"""
-        <div style="margin-bottom:10px; border-bottom:1px solid #333; padding-bottom:10px;">
-            <span class="count-badge">{count_total}</span> 条情报已加载 
-            <span style="color:#888; font-size:0.9rem;">(包含过去24小时)</span>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    with st.container(height=850):
-        if not df.empty:
+    if not df.empty:
+        # 计算时间跨度
+        start_time = df['show_t'].iloc[-1]
+        end_time = df['show_t'].iloc[0]
+        
+        st.markdown(f"""
+            <div style="margin-bottom:10px; border-bottom:1px solid #333; padding-bottom:10px;">
+                <span class="count-badge">{len(df)}</span> 条情报 
+                <span style="color:#f1c40f; margin-left:10px; font-weight:bold;">🕒 覆盖范围: {start_time} 至 {end_time}</span>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        with st.container(height=850):
             for i, row in df.iterrows():
                 with st.container(border=True):
                     ans = row['ai_result']
@@ -160,8 +182,8 @@ with col1:
                     header = f"**{row['show_t']}** &nbsp; `{row['src']}` &nbsp; {tag_html}"
                     st.markdown(header, unsafe_allow_html=True)
                     st.write(row['txt'])
-        else:
-            st.warning("暂无数据")
+    else:
+        st.warning("暂无数据")
 
 with col2:
     st.subheader("📊 核心标的")
