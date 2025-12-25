@@ -9,41 +9,69 @@ import pytz
 
 # --- 1. 基础配置 ---
 st.set_page_config(page_title="AI 多空博弈终端", layout="wide", initial_sidebar_state="expanded")
-st_autorefresh(interval=60000, key="refresh_split_v1")
+st_autorefresh(interval=60000, key="refresh_split_battle_v1")
 
 # CSS 样式 (优化了分栏显示)
 st.markdown("""
     <style>
-        /* 全局字体优化 */
+        /* 全局卡片样式 */
         .news-card { 
             padding: 10px; 
             margin-bottom: 10px; 
-            border-radius: 5px; 
+            border-radius: 6px; 
             border: 1px solid #333;
             background-color: #1a1a1a;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
         }
         
         /* 顶部元数据 */
-        .meta-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; flex-wrap: wrap; }
-        .time-badge { color: #f1c40f; font-family: monospace; font-weight: bold; font-size: 0.9rem; }
-        .src-badge { background: #444; color: #ccc; padding: 1px 5px; border-radius: 3px; font-size: 0.7rem; }
+        .meta-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+        .time-badge { color: #f1c40f; font-family: monospace; font-weight: bold; font-size: 0.85rem; }
+        .src-badge { background: #333; color: #999; padding: 1px 4px; border-radius: 3px; font-size: 0.7rem; border: 1px solid #444; }
 
         /* --- 标签系统 --- */
         /* 板块 */
-        .tag-sector { background: #1e2a4a; color: #64b5f6; border: 1px solid #64b5f6; padding: 1px 6px; border-radius: 3px; font-size: 0.8rem; }
+        .tag-sector { background: #182236; color: #64b5f6; border: 1px solid #2d4675; padding: 1px 5px; border-radius: 3px; font-size: 0.75rem; }
         /* 代码 */
-        .tag-code { background: #2d1e4a; color: #b39ddb; border: 1px solid #b39ddb; padding: 1px 6px; border-radius: 3px; font-family: monospace; font-size: 0.85rem; cursor: pointer; }
+        .tag-code { background: #221836; color: #b39ddb; border: 1px solid #45306b; padding: 1px 5px; border-radius: 3px; font-family: monospace; font-size: 0.8rem; font-weight: bold; }
         
-        /* 强度 */
-        .tag-impact { font-size: 0.85rem; font-weight: bold; margin-left: 4px; }
+        /* 强度标签 */
+        .tag-impact { font-size: 0.8rem; font-weight: bold; margin-left: 4px; }
         
         /* 新闻正文 */
-        .news-text { color: #ddd; font-size: 0.9rem; line-height: 1.4; }
+        .news-text { color: #ccc; font-size: 0.9rem; line-height: 1.45; }
 
         /* --- 分栏标题装饰 --- */
-        .header-bull { color: #ff4b4b; border-bottom: 2px solid #ff4b4b; padding-bottom: 5px; margin-bottom: 15px; font-size: 1.2rem; font-weight: bold; }
-        .header-bear { color: #4ade80; border-bottom: 2px solid #4ade80; padding-bottom: 5px; margin-bottom: 15px; font-size: 1.2rem; font-weight: bold; }
-        .header-neutral { color: #888; border-bottom: 1px solid #555; padding-bottom: 5px; margin-top: 20px; margin-bottom: 15px; font-size: 1rem; }
+        .header-bull { 
+            color: #ff4b4b; 
+            border-bottom: 2px solid #ff4b4b; 
+            padding-bottom: 8px; 
+            margin-bottom: 15px; 
+            font-size: 1.1rem; 
+            font-weight: bold; 
+            text-align: center;
+            background: rgba(255, 75, 75, 0.1);
+            border-radius: 4px;
+        }
+        .header-bear { 
+            color: #4ade80; 
+            border-bottom: 2px solid #4ade80; 
+            padding-bottom: 8px; 
+            margin-bottom: 15px; 
+            font-size: 1.1rem; 
+            font-weight: bold; 
+            text-align: center;
+            background: rgba(74, 222, 128, 0.1);
+            border-radius: 4px;
+        }
+        .header-neutral { 
+            color: #888; 
+            border-top: 1px solid #333; 
+            padding-top: 15px; 
+            margin-top: 20px; 
+            font-size: 1rem; 
+            font-weight: bold;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -65,7 +93,8 @@ with st.sidebar:
         st.error("❌ 密钥缺失")
     
     st.divider()
-    ai_limit = st.slider("🤖 分析条数", 10, 60, 20)
+    # 建议设为 30，太多会慢
+    ai_limit = st.slider("🤖 分析条数", 10, 60, 30)
     
     st.divider()
     new_c = st.text_input("➕ 加代码", placeholder="512480")
@@ -87,13 +116,14 @@ def analyze_deep_prediction(content):
     if not api_key: return None
     try:
         client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+        # 极度精简的Prompt，提高响应速度和准确率
         prompt = f"""
-        你是A股交易员。分析新闻：{content[:150]}
-        严格按此格式输出：方向|板块|龙头代码|强度
-        1. 方向：利好/利空/中性
-        2. 板块：如"光刻机"，越细越好
-        3. 代码：最相关的A股代码(如600519)，无则填"无"
-        4. 强度：暴涨/大涨/微涨/暴跌/大跌/微跌/无影响
+        分析新闻：{content[:150]}
+        请输出：方向|板块|龙头代码|强度
+        1.方向：利好/利空/中性
+        2.板块：如"光刻机"，越细越好
+        3.代码：最相关A股代码(如600519)，无则填"无"
+        4.强度：暴涨/大涨/微涨/暴跌/大跌/微跌/无影响
         示例：利好|黄金|600547|大涨
         """
         res = client.chat.completions.create(
@@ -113,6 +143,7 @@ def clean_date(t_str):
     tz_cn = pytz.timezone('Asia/Shanghai')
     now = datetime.datetime.now(tz_cn)
     try:
+        # 处理只有时间的情况
         if len(t_str) <= 8:
             parts = t_str.split(":")
             dt = now.replace(hour=int(parts[0]), minute=int(parts[1]), second=0)
@@ -178,6 +209,8 @@ def render_card(row):
         imp_c = "#ccc"
         if "暴涨" in imp or "大涨" in imp: imp_c = "#ff4b4b"
         elif "暴跌" in imp or "大跌" in imp: imp_c = "#4ade80"
+        
+        # 只显示有强度的
         if imp != "无影响":
             html_tags += f"<span class='tag-impact' style='color:{imp_c}'>⚡ {imp}</span>"
     
@@ -196,58 +229,56 @@ def render_card(row):
     )
 
 # --- 5. 主界面布局 ---
-# 布局结构：[ 新闻区 (左利好 | 右利空) ] [ 行情区 ]
 col_main, col_quote = st.columns([3, 1]) 
 
 with col_main:
-    with st.spinner("AI 正在进行多空分拣..."):
+    with st.spinner("AI 正在扫描全网数据并进行多空分类..."):
         df = get_quant_data(ai_limit)
     
     if not df.empty:
-        # --- 数据分流 ---
         # 1. 提取 AI 分析过的数据
         df_analyzed = df[df['ai_data'].notnull()]
         
-        # 2. 分类：利好 vs 利空
-        # 注意：这里需要处理 None 的情况
-        bull_df = df_analyzed[df_analyzed['ai_data'].apply(lambda x: '利好' in x['dir'])]
-        bear_df = df_analyzed[df_analyzed['ai_data'].apply(lambda x: '利空' in x['dir'])]
+        # 2. 分类：利好(Bull) vs 利空(Bear)
+        # 容错：防止 AI 返回 None 导致报错
+        bull_df = df_analyzed[df_analyzed['ai_data'].apply(lambda x: x is not None and '利好' in x['dir'])]
+        bear_df = df_analyzed[df_analyzed['ai_data'].apply(lambda x: x is not None and '利空' in x['dir'])]
         
-        # 3. 中性或未分析的历史数据
-        # 逻辑：不是利好 且 不是利空 的所有数据
-        rest_df = df[~df.index.isin(bull_df.index) & ~df.index.isin(bear_df.index)]
+        # 3. 剩下的（中性 或 历史未分析的）
+        # 逻辑：总表里 剔除掉 利好和利空 的行
+        exclude_indices = list(bull_df.index) + list(bear_df.index)
+        rest_df = df[~df.index.isin(exclude_indices)]
         
         # --- 双栏布局 ---
         c_bull, c_bear = st.columns(2)
         
         with c_bull:
-            st.markdown(f"<div class='header-bull'>🔥 利好情报 ({len(bull_df)})</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='header-bull'>🔥 红色·利好 ({len(bull_df)})</div>", unsafe_allow_html=True)
             if not bull_df.empty:
                 for _, row in bull_df.iterrows():
                     render_card(row)
             else:
-                st.info("暂无重大利好")
+                st.caption("暂无重大利好")
                 
         with c_bear:
-            st.markdown(f"<div class='header-bear'>🟢 利空警报 ({len(bear_df)})</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='header-bear'>🟢 绿色·利空 ({len(bear_df)})</div>", unsafe_allow_html=True)
             if not bear_df.empty:
                 for _, row in bear_df.iterrows():
                     render_card(row)
             else:
-                st.success("暂无重大利空")
+                st.caption("暂无重大利空")
         
-        # --- 底部通栏：历史消息 ---
-        st.markdown(f"<div class='header-neutral'>😐 中性 / 历史资讯 ({len(rest_df)})</div>", unsafe_allow_html=True)
-        # 为了性能，历史消息只显示最新的 20 条，或者用滚动容器
-        with st.container(height=400):
-            for _, row in rest_df.head(100).iterrows(): # 显示前100条历史
-                # 历史消息简化显示
+        # --- 底部通栏：历史消息/中性 ---
+        st.markdown(f"<div class='header-neutral'>😐 历史资讯 / 中性消息</div>", unsafe_allow_html=True)
+        # 用滚动容器装历史消息，避免太长
+        with st.container(height=500):
+            for _, row in rest_df.head(100).iterrows(): 
+                # 简单显示
                 st.markdown(
                     f"""
-                    <div style="border-bottom:1px solid #333; padding:8px 0;">
-                        <span style="color:#888; font-family:monospace;">{row['show_t']}</span> 
-                        <span style="background:#333; color:#aaa; font-size:0.7rem; padding:1px 4px; border-radius:3px;">{row['src']}</span>
-                        <span style="color:#ccc; margin-left:8px;">{row['txt']}</span>
+                    <div style="border-bottom:1px solid #222; padding:6px 0; font-size:0.9rem; color:#888;">
+                        <span style="color:#666; font-family:monospace; margin-right:10px;">{row['show_t']}</span>
+                        {row['txt']}
                     </div>
                     """,
                     unsafe_allow_html=True
@@ -261,4 +292,10 @@ with col_quote:
     try:
         codes = st.session_state.watchlist
         spot = ak.fund_etf_spot_em()
-        my_spot = spot[spot['代码'].
+        my_spot = spot[spot['代码'].isin(codes)]
+        for _, r in my_spot.iterrows():
+            val = float(r['涨跌幅'])
+            st.metric(label=f"{r['名称']}", value=r['最新价'], delta=f"{val}%", delta_color="inverse")
+            st.divider()
+    except:
+        st.caption("行情加载中...")
