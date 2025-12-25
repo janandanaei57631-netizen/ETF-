@@ -3,43 +3,45 @@ import akshare as ak
 import pandas as pd
 from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
+import html # <--- 新增：专门用来处理乱码的工具
 
 # --- 1. 基础设置 ---
-st.set_page_config(page_title="AI 最终版", layout="wide", initial_sidebar_state="expanded")
-# 改了 key，强制让之前的缓存失效
-st_autorefresh(interval=300000, key="refresh_v3")
+st.set_page_config(page_title="AI 交易员", layout="wide", initial_sidebar_state="expanded")
+st_autorefresh(interval=300000, key="refresh_final_v1")
 
-# CSS 美化 (红绿标签)
+# CSS 样式 (优化了时间的显示)
 st.markdown("""
     <style>
-        .news-box { border-bottom: 1px solid #333; padding: 12px 0; }
-        .time-tag { color: #ffab40; font-weight: bold; font-family: monospace; font-size: 1rem; margin-right: 8px; }
-        .source-tag { background: #444; color: #ddd; padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; margin-right: 8px; }
+        .news-box { border-bottom: 1px solid #333; padding: 14px 0; }
+        /* 时间标签：改用亮黄色，加宽，防止被挡住 */
+        .time-tag { color: #f1c40f; font-weight: bold; font-family: 'Courier New', monospace; font-size: 1.1rem; margin-right: 10px; min-width: 60px; display: inline-block; }
+        .source-tag { background: #444; color: #ddd; padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; margin-right: 8px; vertical-align: middle; }
         
-        /* AI 标签 - 强制显示 */
-        .ai-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85rem; margin-bottom: 5px; }
+        /* AI 标签样式 */
+        .ai-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.9rem; vertical-align: middle; }
         .tag-bull { background: #3d1a1a; color: #ff4b4b; border: 1px solid #ff4b4b; } 
         .tag-bear { background: #1a3d2b; color: #4ade80; border: 1px solid #4ade80; } 
         .tag-neutral { background: #333; color: #aaa; border: 1px solid #555; }
+        
+        /* 新闻内容：防止太长 */
+        .news-content { margin-top: 8px; color: #ccc; line-height: 1.6; font-size: 0.95rem; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 侧边栏配置 ---
+# --- 2. 侧边栏 ---
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = ["518880", "512480", "513130", "159915", "513050"]
 
 with st.sidebar:
     st.header("⚙️ 控制台")
-    # AI 状态检测
     client = None
     if "DEEPSEEK_KEY" in st.secrets:
         client = OpenAI(api_key=st.secrets["DEEPSEEK_KEY"], base_url="https://api.deepseek.com")
         st.success("✅ AI 引擎已连接")
     else:
-        st.error("❌ 密钥缺失，请检查 Secrets")
+        st.error("❌ 密钥缺失")
         
     st.divider()
-    # 标的管理
     new_code = st.text_input("➕ 加自选", placeholder="代码")
     if new_code and new_code not in st.session_state.watchlist:
         st.session_state.watchlist.append(new_code)
@@ -50,19 +52,19 @@ with st.sidebar:
         for c in rem_list: st.session_state.watchlist.remove(c)
         st.rerun()
         
-    # 【新增】手动清除缓存按钮
-    if st.button("🧹 强制刷新数据"):
+    if st.button("🧹 修复显示/刷新"):
         st.cache_data.clear()
         st.rerun()
 
-# --- 3. AI 分析函数 ---
+# --- 3. AI 分析 ---
 def analyze_simple(content):
     if not client: return "❌无Key"
     try:
-        # 简单直接的指令
+        # 截取前100个字给AI，省流量且防止报错
+        safe_content = content[:100]
         res = client.chat.completions.create(
             model="deepseek-chat",
-            messages=[{"role": "user", "content": f"分析新闻：{content}\n请只回答结论：是【利好】还是【利空】？对象是谁？\n格式：【利好】xx板块 或 【利空】xx板块\n字数限制：8个字以内。"}],
+            messages=[{"role": "user", "content": f"分析新闻：{safe_content}\n只回结论：【利好】xx板块 或 【利空】xx板块。8字以内。"}],
             temperature=0.1,
             max_tokens=50
         )
@@ -71,24 +73,31 @@ def analyze_simple(content):
         return "⚠️分析超时"
 
 # --- 4. 数据获取 ---
-# 改了函数名，防止读取旧缓存
 @st.cache_data(ttl=180)
-def get_news_v3():
+def get_news_safe():
     news_list = []
     try:
-        # 财联社
-        df_cn = ak.stock_info_global_cls(symbol="全部").head(15)
+        df_cn = ak.stock_info_global_cls(symbol="全部").head(20)
         for _, row in df_cn.iterrows():
             t = str(row['发布时间'])
-            news_list.append({"full_time": t, "display_time": t[11:16], "content": row['内容'], "source": "CN"})
+            # 兼容不同的时间格式
+            if len(t) > 10:
+                short_t = t[11:16] # 取 HH:MM
+            else:
+                short_t = t # 如果时间很短就直接显示
+            
+            news_list.append({"full_time": t, "display_time": short_t, "content": str(row['内容']), "source": "CN"})
     except: pass
     
     try:
-        # 金十
-        df_js = ak.js_news(count=15)
+        df_js = ak.js_news(count=20)
         for _, row in df_js.iterrows():
             t = str(row['time'])
-            news_list.append({"full_time": t, "display_time": t[11:16], "content": row['title'], "source": "Global"})
+            if len(t) > 10:
+                short_t = t[11:16]
+            else:
+                short_t = t
+            news_list.append({"full_time": t, "display_time": short_t, "content": str(row['title']), "source": "Global"})
     except: pass
 
     df = pd.DataFrame(news_list)
@@ -102,46 +111,47 @@ def get_news_v3():
 col1, col2 = st.columns([2.5, 1])
 
 with col1:
-    st.subheader("🔥 实时情报 (AI 标签版)")
-    news_df = get_news_v3()
+    st.subheader("🔥 实时情报")
+    news_df = get_news_safe()
     
     if not news_df.empty:
-        # 【核心修复】使用 enumerate 强制生成序号 i，从 0 开始
-        # 这样无论数据怎么乱，i 永远是 0, 1, 2...
+        # 这里的 enumerate 确保序号绝对正确
         for i, (index, row) in enumerate(news_df.iterrows()):
             
-            ai_tag_html = ""
+            # --- 核心修复：防止 HTML 乱码 ---
+            # 使用 html.escape 把新闻里的特殊符号变成安全的字符
+            safe_content = html.escape(row['content'])
             
-            # 只分析最新的 6 条
+            ai_tag_html = ""
             if i < 6:
-                ans = analyze_simple(row['content'])
+                ans = analyze_simple(safe_content)
+                safe_ans = html.escape(ans) # AI 的回答也要清洗一下
                 
-                # 标签配色逻辑
                 if "利好" in ans:
-                    ai_tag_html = f'<span class="ai-tag tag-bull">🚀 {ans}</span>'
+                    ai_tag_html = f'<span class="ai-tag tag-bull">🚀 {safe_ans}</span>'
                 elif "利空" in ans:
-                    ai_tag_html = f'<span class="ai-tag tag-bear">🧪 {ans}</span>'
+                    ai_tag_html = f'<span class="ai-tag tag-bear">🧪 {safe_ans}</span>'
                 elif "中性" in ans:
-                    ai_tag_html = f'<span class="ai-tag tag-neutral">😐 {ans}</span>'
+                    ai_tag_html = f'<span class="ai-tag tag-neutral">😐 {safe_ans}</span>'
                 else:
-                    # 哪怕出错也要显示出来
-                    ai_tag_html = f'<span class="ai-tag tag-neutral">🤖 {ans}</span>'
+                    ai_tag_html = f'<span class="ai-tag tag-neutral">🤖 {safe_ans}</span>'
 
+            # 渲染 HTML (结构优化)
             st.markdown(
                 f"""
                 <div class="news-box">
-                    <div>
+                    <div style="display: flex; align-items: center; flex-wrap: wrap;">
                         <span class="time-tag">{row['display_time']}</span>
                         <span class="source-tag">{row['source']}</span>
                         {ai_tag_html}
                     </div>
-                    <div style="margin-top:6px; color:#ccc; line-height:1.4;">{row['content']}</div>
+                    <div class="news-content">{safe_content}</div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
     else:
-        st.info("正在加载数据...")
+        st.info("正在获取最新数据...")
 
 with col2:
     st.subheader("📊 核心标的")
@@ -158,18 +168,18 @@ with col2:
                     f"""
                     <div style="border-bottom:1px solid #333; padding:10px 0; display:flex; justify-content:space-between;">
                         <div>
-                            <div style="font-weight:bold;">{row['名称']}</div>
+                            <div style="font-weight:bold; font-size:1.05rem;">{row['名称']}</div>
                             <div style="font-size:0.8rem; color:#888;">{row['代码']}</div>
                         </div>
                         <div style="text-align:right;">
-                            <div style="font-size:1.1rem; font-weight:bold;">{row['最新价']}</div>
-                            <div style="color:{c};">{arrow} {val}%</div>
+                            <div style="font-size:1.2rem; font-weight:bold;">{row['最新价']}</div>
+                            <div style="color:{c}; font-weight:bold;">{arrow} {val}%</div>
                         </div>
                     </div>
                     """, 
                     unsafe_allow_html=True
                 )
         else:
-            st.caption("暂无自选")
+            st.caption("暂无自选，请在左侧添加")
     except:
-        st.caption("行情连接中...")
+        st.caption("行情加载中...")
