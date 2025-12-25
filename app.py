@@ -3,24 +3,23 @@ import akshare as ak
 import pandas as pd
 from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
+from datetime import datetime
 
 # --- 1. 基础配置 ---
-st.set_page_config(page_title="AI 深度投研系统", layout="wide")
-st_autorefresh(interval=60000, key="data_refresh") # 1分钟刷新
+st.set_page_config(page_title="AI 全自动投研 (红涨绿跌)", layout="wide")
+# 自动刷新频率设为 3 分钟 (180000毫秒)，因为全自动分析比较耗时，刷太快会看不完
+st_autorefresh(interval=180000, key="data_refresh")
 
-# 读取你在 Streamlit 后台填写的 DeepSeek Key
+# 配置 DeepSeek Key
 try:
-    # 尝试读取密钥
     if "DEEPSEEK_KEY" in st.secrets:
-        api_key = st.secrets["DEEPSEEK_KEY"]
-        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+        client = OpenAI(api_key=st.secrets["DEEPSEEK_KEY"], base_url="https://api.deepseek.com")
     else:
         client = None
 except:
     client = None
 
-# --- 2. 你的自选 ETF 池 (AI 会从这里面挑) ---
-# 你可以把你不关心的删掉，加上你关心的
+# --- 2. 你的自选 ETF 池 ---
 MY_POOL = {
     "518880": "黄金ETF",
     "512480": "半导体ETF",
@@ -31,115 +30,128 @@ MY_POOL = {
     "515790": "光伏ETF",
     "512690": "酒ETF",
     "512010": "医药ETF",
-    "513500": "标普500"
+    "513500": "标普500",
+    "513330": "恒生互联网"
 }
 
-# --- 3. AI 核心分析大脑 (调用你充值的额度) ---
-def get_ai_analysis(news_content):
-    if not client: 
-        return "❌ 错误：未检测到 API Key，请检查 Secrets 设置。"
+# --- 3. AI 分析大脑 (极简输出版) ---
+def analyze_news_automatically(content):
+    if not client: return "❌ 未配置 Key"
     
-    # 这是一个昂贵但强大的指令，会消耗 token
     prompt = f"""
-    作为资深交易员，请分析这条新闻对投资市场的影响。
-    新闻：{news_content}
+    分析新闻：{content}
+    请从以下ETF池中：{list(MY_POOL.keys())} {list(MY_POOL.values())}，选出受影响最大的1个。
     
-    请严格按照以下格式回答（不要废话）：
-    1. 【核心逻辑】：用一句话讲清楚传导链条（如：降息->美元跌->黄金涨）。
-    2. 【操作建议】：利好/利空 哪个具体板块？
-    3. 【关联标的】：从这个列表中选出最相关的一只ETF：{list(MY_POOL.keys())} {list(MY_POOL.values())}。如果没有直接相关的，请回答“无”。
+    格式要求（严禁废话）：
+    【方向】利好/利空/中性
+    【标的】代码 (名称)
+    【逻辑】15字以内短句
     """
-    
     try:
-        response = client.chat.completions.create(
+        res = client.chat.completions.create(
             model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "你是一个精通宏观经济和A股ETF的专业分析师。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1 # 0.1 代表极其理智，不胡编乱造
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=100 # 限制输出长度，提高速度
         )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"AI 思考中断: {str(e)}"
-
-# --- 4. 获取数据的函数 ---
-@st.cache_data(ttl=300) # 缓存5分钟，避免太频繁刷新
-def get_news():
-    try:
-        # 尝试抓取
-        df = ak.stock_info_global_cls(symbol="全部").head(10)
-        # 统一列名，防止报错
-        if '内容' in df.columns: 
-            df.rename(columns={'内容': 'content', '发布时间': 'publish_at'}, inplace=True)
-        return df
+        return res.choices[0].message.content
     except:
-        # 备用方案
-        try:
-            df = ak.js_news(count=10)
-            df.rename(columns={'time': 'publish_at', 'title': 'content'}, inplace=True)
-            return df
-        except:
-            return pd.DataFrame()
+        return "AI 分析超时"
 
-@st.cache_data(ttl=30)
-def get_prices():
-    return ak.fund_etf_spot_em()
+# --- 4. 超级新闻聚合器 (国内+国外) ---
+@st.cache_data(ttl=180) # 3分钟缓存
+def get_merged_news():
+    news_list = []
+    
+    # 源1：财联社 (国内A股为主)
+    try:
+        df_cn = ak.stock_info_global_cls(symbol="全部").head(15)
+        # 统一格式
+        for _, row in df_cn.iterrows():
+            # 财联社的时间通常是不带日期的，需要处理一下或者直接用
+            news_list.append({
+                "time": str(row['发布时间']), 
+                "content": row['内容'],
+                "source": "🇨🇳 国内"
+            })
+    except:
+        pass
 
-# --- 5. 网页界面布局 ---
-st.title("🧠 AI 智能操盘手 (DeepSeek 加持版)")
+    # 源2：金十数据 (国际/宏观/黄金/美股)
+    try:
+        df_global = ak.js_news(count=15)
+        for _, row in df_global.iterrows():
+            news_list.append({
+                "time": str(row['time']), 
+                "content": row['title'], # 金十的内容在title字段
+                "source": "🌍 全球"
+            })
+    except:
+        pass
+    
+    # 转为 DataFrame 并按时间排序 (简单的字符串排序，要求格式大概一致)
+    final_df = pd.DataFrame(news_list)
+    if not final_df.empty:
+        # 简单去重
+        final_df.drop_duplicates(subset=['content'], inplace=True)
+        # 取前 10 条显示
+        return final_df.head(10)
+    return pd.DataFrame()
 
-# 检查 Key 是否配置成功
-if not client:
-    st.error("⚠️ 警告：系统未检测到 API Key，AI 无法工作！请去 Streamlit 后台 Secrets 填入 DEEPSEEK_KEY。")
+# --- 5. 页面布局 ---
+st.title("🤖 AI 全自动盯盘系统")
+st.caption("🔴 红色=涨 | 🟢 绿色=跌 | AI 自动解读前 8 条最新情报")
 
-col1, col2 = st.columns([1.5, 1])
+col1, col2 = st.columns([2, 1])
 
 # 加载数据
-with st.spinner("正在连接交易所数据..."):
-    news_df = get_news()
-    prices_df = get_prices()
+with st.spinner("正在聚合全球新闻并进行 AI 分析..."):
+    news_df = get_merged_news()
+    prices_df = ak.fund_etf_spot_em()
 
 with col1:
-    st.subheader("📢 实时新闻深度解读")
+    st.subheader("🔥 全球实时情报 (自动分析)")
     if not news_df.empty:
-        for index, row in news_df.iterrows():
-            content = row.get('content', '无内容')
-            time_str = row.get('publish_at', '刚刚')
-            
-            with st.container(border=True):
-                # 标题和时间
-                st.markdown(f"**⏰ {time_str}**")
-                st.write(content)
-                
-                # --- 这里的按钮就是“开关” ---
-                # 只有当你点击时，才会扣费调用 AI，省钱又高效
-                btn_label = f"🤖 AI 分析影响 (点击预测)"
-                if st.button(btn_label, key=f"btn_{index}"):
-                    with st.spinner("AI 正在阅读新闻并构建逻辑链..."):
-                        # 这里调用 DeepSeek
-                        analysis_result = get_ai_analysis(content)
-                        # 显示结果，用蓝色背景框
-                        st.info(analysis_result)
+        # 遍历新闻
+        for i, row in news_df.iterrows():
+            # 只自动分析前 8 条，避免页面卡死
+            if i < 8: 
+                with st.container(border=True):
+                    # 第一行：来源 + 时间
+                    st.markdown(f"**{row['source']} | ⏰ {row['time']}**")
+                    st.write(row['content'])
+                    
+                    # --- AI 自动介入 (无需点击) ---
+                    ai_result = analyze_news_automatically(row['content'])
+                    
+                    # 根据利好/利空 改变背景色
+                    if "利好" in ai_result:
+                        st.success(f"🤖 {ai_result}") # 绿色/浅红背景
+                    elif "利空" in ai_result:
+                        st.error(f"🤖 {ai_result}")   # 红色/浅红背景
+                    else:
+                        st.info(f"🤖 {ai_result}")    # 蓝色背景
+            else:
+                # 超过8条的只显示标题，为了性能
+                st.caption(f"{row['time']} - {row['content'][:30]}...")
     else:
-        st.warning("暂无最新新闻，请稍后刷新...")
+        st.warning("暂无数据，请检查网络或刷新")
 
 with col2:
-    st.subheader("📊 你的自选池行情")
+    st.subheader("📊 实时行情 (红涨绿跌)")
     
-    # 过滤出你的池子
     my_codes = list(MY_POOL.keys())
-    # 确保列名匹配
     if '代码' in prices_df.columns:
-        my_market_data = prices_df[prices_df['代码'].isin(my_codes)]
+        my_df = prices_df[prices_df['代码'].isin(my_codes)]
         
-        for _, row in my_market_data.iterrows():
-            name = row['名称']
-            code = row['代码']
-            price = row['最新价']
-            change = row['涨跌幅']
-            
-            st.metric(label=f"{name}", value=price, delta=f"{change}%")
+        for _, row in my_df.iterrows():
+            # --- 颜色修正逻辑 ---
+            # Streamlit 的 "inverse" 模式下：正数(涨)变红，负数(跌)变绿。
+            # 这正是 A 股股民需要的。
+            st.metric(
+                label=f"{row['名称']}", 
+                value=row['最新价'], 
+                delta=f"{row['涨跌幅']}%",
+                delta_color="inverse" # 关键设置：红涨绿跌
+            )
             st.divider()
-    else:
-        st.error("行情数据格式异常")
