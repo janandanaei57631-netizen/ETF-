@@ -5,21 +5,20 @@ from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
 import concurrent.futures
 import datetime
-import pytz # 用于时区转换
+import pytz 
 
-# --- 1. 极速配置 ---
-st.set_page_config(page_title="AI 极速实盘", layout="wide", initial_sidebar_state="expanded")
+# --- 1. 基础配置 ---
+st.set_page_config(page_title="AI 24h全景天眼", layout="wide", initial_sidebar_state="expanded")
+# 1分钟刷新一次 (数据量大，没必要30秒刷)
+st_autorefresh(interval=60000, key="refresh_24h")
 
-# 【关键修改】每 30 秒强制刷新一次页面，不给它偷懒的机会
-st_autorefresh(interval=30000, key="refresh_realtime_v2")
-
-# CSS 样式
+# CSS 样式 (红绿标签 + 滚动条美化)
 st.markdown("""
     <style>
         .bull { background-color: #5a2d2d; color: #ff6b6b; padding: 2px 6px; border-radius: 4px; border: 1px solid #ff6b6b; font-size: 0.85rem; font-weight: bold; }
         .bear { background-color: #1e3a2a; color: #4ade80; padding: 2px 6px; border-radius: 4px; border: 1px solid #4ade80; font-size: 0.85rem; font-weight: bold; }
         .neutral { background-color: #333; color: #ccc; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }
-        .status-bar { font-size: 0.8rem; color: #888; margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 5px; }
+        .status-bar { font-size: 0.8rem; color: #888; margin-bottom: 5px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -29,11 +28,9 @@ if 'watchlist' not in st.session_state:
 
 with st.sidebar:
     st.header("⚡ 控制台")
-    
-    # 获取当前北京时间
     tz_cn = pytz.timezone('Asia/Shanghai')
-    now_cn = datetime.datetime.now(tz_cn).strftime("%H:%M:%S")
-    st.caption(f"北京时间: {now_cn}")
+    now_cn = datetime.datetime.now(tz_cn).strftime("%H:%M")
+    st.caption(f"当前时间: {now_cn}")
 
     if "DEEPSEEK_KEY" in st.secrets:
         api_key = st.secrets["DEEPSEEK_KEY"]
@@ -41,6 +38,10 @@ with st.sidebar:
     else:
         api_key = None
         st.error("❌ 密钥缺失")
+    
+    st.divider()
+    # 增加一个滑块，让你自己控制想看多少条新闻
+    news_limit = st.slider("📊 显示新闻条数", min_value=20, max_value=100, value=50, step=10)
     
     st.divider()
     new_c = st.text_input("➕ 加代码", placeholder="512480")
@@ -53,16 +54,15 @@ with st.sidebar:
         for c in rem_list: st.session_state.watchlist.remove(c)
         st.rerun()
     
-    # 红色按钮：手动强制拉取
-    if st.button("🔴 立即强制刷新"):
+    if st.button("🔴 强制刷新"):
         st.cache_data.clear()
         st.rerun()
 
-# --- 3. AI 分析 (单条) ---
+# --- 3. AI 分析 (并发单元) ---
 def analyze_single_news(content):
     if not api_key: return ""
     try:
-        # 极简模式，减少 Token 消耗，提高速度
+        # 极简Prompt，省流加速
         client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
         res = client.chat.completions.create(
             model="deepseek-chat",
@@ -72,41 +72,42 @@ def analyze_single_news(content):
         return res.choices[0].message.content.strip()
     except: return ""
 
-# --- 4. 数据获取 (缓存仅15秒) ---
-# 【关键修改】ttl=15，意味着每15秒它就会认为数据过期，必须重新去网上抓
-@st.cache_data(ttl=15)
-def get_realtime_data():
+# --- 4. 大数据获取 (Count 设为 100) ---
+@st.cache_data(ttl=60) # 缓存60秒
+def get_24h_data(limit_count):
     news = []
     
-    # 源1: 金十数据 (通常最快)
+    # 源1: 金十数据 (抓取100条，覆盖24h)
     try:
-        df_js = ak.js_news(count=20)
+        df_js = ak.js_news(count=limit_count + 20) # 多抓一点用来过滤
         for _, r in df_js.iterrows():
-            t = str(r['time']) # 格式通常是 YYYY-MM-DD HH:MM:SS
-            # 简单处理时间显示
-            show_t = t[11:16] if len(t) > 16 else t 
+            t = str(r['time']) 
+            # 格式化显示时间
+            show_t = t[5:16] if len(t) > 16 else t # 显示 MM-DD HH:MM
             news.append({"t": t, "show_t": show_t, "txt": str(r['title']), "src": "Global"})
     except: pass
 
-    # 源2: 财联社
+    # 源2: 财联社 (抓取最大量)
     try:
-        df_cn = ak.stock_info_global_cls(symbol="全部").head(20)
+        df_cn = ak.stock_info_global_cls(symbol="全部").head(limit_count)
         for _, r in df_cn.iterrows():
             t = str(r['发布时间'])
-            show_t = t[11:16] if len(t) > 10 else t
+            show_t = t[5:16] if len(t) > 10 else t
             news.append({"t": t, "show_t": show_t, "txt": str(r['内容']), "src": "CN"})
     except: pass
 
     df = pd.DataFrame(news)
     if df.empty: return df
 
-    # 排序：确保最新的在最上面
+    # 排序 & 去重
     df.sort_values(by='t', ascending=False, inplace=True)
     df.drop_duplicates(subset=['txt'], inplace=True)
-    df = df.head(15) # 取前15条
+    
+    # 截取用户设定的数量 (比如 50 条)
+    df = df.head(limit_count)
 
-    # 多线程 AI 分析
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    # 开启 15 个线程加速分析 (应对大数据量)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
         results = list(executor.map(analyze_single_news, df['txt'].tolist()))
     
     df['ai_result'] = results
@@ -116,32 +117,36 @@ def get_realtime_data():
 col1, col2 = st.columns([2.5, 1])
 
 with col1:
-    # 顶部状态栏：显示数据抓取时间，让你心中有数
+    # 状态栏
     tz_cn = pytz.timezone('Asia/Shanghai')
     update_time = datetime.datetime.now(tz_cn).strftime("%H:%M:%S")
-    st.markdown(f"<div class='status-bar'>🔥 实时情报 | 数据更新于: {update_time} (每30秒自动刷新)</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='status-bar'>🔥 24小时全景 | 已抓取最新 {news_limit} 条情报 | 更新: {update_time}</div>", unsafe_allow_html=True)
     
-    # 获取数据（不显示转圈圈，体验更好）
-    df = get_realtime_data()
+    # 获取数据
+    with st.spinner(f"正在全速扫描过去 24 小时的 {news_limit} 条新闻，请稍候..."):
+        df = get_24h_data(news_limit)
     
-    if not df.empty:
-        for _, row in df.iterrows():
-            with st.container(border=True):
-                ans = row['ai_result']
-                # 标签生成
-                tag_html = ""
-                if ans:
-                    if "利好" in ans: tag_html = f'<span class="bull">🚀 {ans}</span>'
-                    elif "利空" in ans: tag_html = f'<span class="bear">🧪 {ans}</span>'
-                    elif "中性" in ans: tag_html = f'<span class="neutral">😐 {ans}</span>'
-                    else: tag_html = f'<span class="neutral">🤖 {ans}</span>'
-                
-                # 渲染
-                header = f"**{row['show_t']}** &nbsp; `{row['src']}` &nbsp; {tag_html}"
-                st.markdown(header, unsafe_allow_html=True)
-                st.write(row['txt'])
-    else:
-        st.warning("正在连接数据源... 如果长时间无反应，请点击左侧红色按钮。")
+    # 【核心升级】使用固定高度容器，实现“内部滚动”
+    # height=800 意味着这个框固定 800像素高，内容多了会自动出滚动条
+    with st.container(height=800):
+        if not df.empty:
+            for _, row in df.iterrows():
+                # 原生容器，防乱码
+                with st.container(border=True):
+                    ans = row['ai_result']
+                    tag_html = ""
+                    if ans:
+                        if "利好" in ans: tag_html = f'<span class="bull">🚀 {ans}</span>'
+                        elif "利空" in ans: tag_html = f'<span class="bear">🧪 {ans}</span>'
+                        elif "中性" in ans: tag_html = f'<span class="neutral">😐 {ans}</span>'
+                        else: tag_html = f'<span class="neutral">🤖 {ans}</span>'
+                    
+                    # 显示：日期 时间 来源 标签
+                    header = f"**{row['show_t']}** &nbsp; `{row['src']}` &nbsp; {tag_html}"
+                    st.markdown(header, unsafe_allow_html=True)
+                    st.write(row['txt'])
+        else:
+            st.warning("数据连接中... 请点击左侧红色按钮强制刷新")
 
 with col2:
     st.subheader("📊 核心标的")
