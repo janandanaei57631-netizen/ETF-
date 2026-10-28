@@ -6,6 +6,7 @@ from streamlit_autorefresh import st_autorefresh
 import concurrent.futures
 import datetime
 import pytz 
+import logging
 
 # --- 1. 基础配置 ---
 st.set_page_config(page_title="AI 智能ETF匹配", layout="wide", initial_sidebar_state="expanded")
@@ -123,7 +124,9 @@ def smart_map_to_etf(ai_keyword):
     """
     智能匹配逻辑 (拒绝单字，最长匹配优先)
     """
-    if not ai_keyword or ai_keyword == "无": return None
+    ai_keyword = (ai_keyword or "").strip()
+    if not ai_keyword or ai_keyword == "无":
+        return None, None
     
     # 扁平化字典，方便处理
     # key_list = [("飞行汽车", "512660", "军工龙头"), ("低空", "512660", "军工龙头")...]
@@ -145,8 +148,8 @@ def smart_map_to_etf(ai_keyword):
         if key in ai_keyword:
             return code, name
             
-        # 3. 反向包含 (容错)
-        # 如果 AI提取的词 很短，刚好包含在 字典长词 里 (这种情况较少，但为了保险)
+    # 所有正向包含均未命中后，再尝试反向包含，避免“汽车”误中“飞行汽车”
+    for key, code, name in flat_mapping:
         if len(ai_keyword) >= 2 and ai_keyword in key:
             return code, name
             
@@ -177,21 +180,31 @@ def analyze_news(content):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1, max_tokens=50
         )
-        parts = res.choices[0].message.content.strip().split('|')
-        if len(parts) >= 3:
-            concept = parts[1].strip()
-            # 智能匹配
-            code, name = smart_map_to_etf(concept)
-            
-            return {
-                "dir": parts[0].strip(),
-                "concept": concept,
-                "etf_code": code,
-                "etf_name": name,
-                "impact": parts[2].strip()
-            }
+        raw = res.choices[0].message.content
+        if not isinstance(raw, str):
+            logging.warning("AI 返回格式异常：正文不是字符串")
+            return None
+        parts = [part.strip() for part in raw.split("|")]
+        if (
+            len(parts) != 3
+            or not all(parts)
+            or parts[0] not in {"利好", "利空", "中性"}
+            or parts[2] not in {"暴涨", "大涨", "微涨", "暴跌", "大跌", "微跌", "无"}
+        ):
+            logging.warning("AI 返回格式异常：应为方向|核心赛道|强度")
+            return None
+        direction, concept, impact = parts
+        code, name = smart_map_to_etf(concept)
+        return {
+            "dir": direction,
+            "concept": concept,
+            "etf_code": code,
+            "etf_name": name,
+            "impact": impact,
+        }
+    except Exception:
+        logging.exception("AI 分析失败")
         return None
-    except: return None
 
 # --- 5. 数据获取 ---
 def clean_date(t_str):
